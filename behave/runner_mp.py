@@ -20,9 +20,6 @@ else:
 
 THREAD_IDENTIFICATION = None
 
-#: Seconds to wait when reaping a worker that has already exited.
-WORKER_JOIN_TIMEOUT = 30
-
 class MultiProcRunner(Runner):
     """Master multiprocessing runner: scans jobs and distributes to slaves
 
@@ -36,6 +33,7 @@ class MultiProcRunner(Runner):
         self.jobsq = multiprocessing.JoinableQueue()
         self.resultsq = multiprocessing.Queue()
         self._reported_features = set()
+        self.completed_jobs = set()
         self.results_fail = False
 
     def run_with_paths(self):
@@ -74,27 +72,45 @@ class MultiProcRunner(Runner):
         self.config.outputs = old_outs
         # 1: consume results for as long as any worker is alive.
         #
-        # resultsq.put() is asynchronous: it hands the payload to a background
-        # feeder thread, and a worker cannot exit until that thread has flushed
-        # everything into the pipe. The pipe holds ~64 KB, so on a suite whose
-        # formatter output is larger than that the feeder blocks until the parent
-        # reads. Waiting on jobsq.join() or p.join() before the queue is drained
-        # therefore deadlocks: the parent waits for the workers, each worker waits
-        # for its feeder thread, and the feeder waits for the parent to read.
+        # resultsq.put() only queues the payload; a background feeder thread
+        # writes it into the pipe, and a worker cannot exit until that thread has
+        # flushed everything. The pipe holds ~64 KB, so once the parent stops
+        # reading, a feeder with more than that still to write blocks forever, its
+        # worker can never exit, and the parent then blocks joining it - either
+        # below or at interpreter shutdown.
+        #
+        # This loop also replaces jobsq.join(), which hung for an unrelated
+        # reason: task_done() sits after the yield in iter_queue, so a worker that
+        # dies mid-job never calls it and the parent waits forever.
         while any([p.is_alive() for p in procs]):
             self.consume_results(timeout=0.1)
 
-        print ("INFO: all jobs have been processed")
+        print ("INFO: all workers have exited")
 
-        # Safe now: every worker has already exited, so nothing is mid-flush.
+        # Every worker has already been reaped by is_alive(), so this cannot block.
         for p in procs:
-            p.join(timeout=WORKER_JOIN_TIMEOUT)
+            p.join()
 
         print ("INFO: all sub-processes have returned")
 
         while self.consume_results(timeout=0.1):
             # 2: whatever is still buffered in the pipe
             pass
+
+        # A worker that died never sent its results, and never sent the 'set_fail'
+        # message that is the only thing setting results_fail. Without these
+        # checks the lost work would be reported as merely untested and the run
+        # would exit 0.
+        crashed = [p.exitcode for p in procs if p.exitcode]
+        if crashed:
+            print ("ERROR: %d worker(s) exited abnormally: %r" % (len(crashed), crashed))
+            self.results_fail = True
+
+        missing = set(self.jobs_map) - self.completed_jobs
+        if missing:
+            print ("ERROR: %d of %d job(s) never reported a result"
+                   % (len(missing), len(self.jobs_map)))
+            self.results_fail = True
 
         for f in self.features:
             # make sure all features (including ones that have not returned)
@@ -121,6 +137,7 @@ class MultiProcRunner(Runner):
             self.results_fail = True
             return True
 
+        self.completed_jobs.add(job_id)
         item = self.jobs_map.get(job_id)
         if item is None:
             print(("ERROR: job_id=%x not found in master map" % job_id))
