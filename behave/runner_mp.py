@@ -20,6 +20,9 @@ else:
 
 THREAD_IDENTIFICATION = None
 
+#: Seconds to wait when reaping a worker that has already exited.
+WORKER_JOIN_TIMEOUT = 30
+
 class MultiProcRunner(Runner):
     """Master multiprocessing runner: scans jobs and distributes to slaves
 
@@ -69,27 +72,28 @@ class MultiProcRunner(Runner):
         self.config.reporters = old_reporters
         self.formatters = make_formatters(self.config, old_outs)
         self.config.outputs = old_outs
-        while (not self.jobsq.empty()):
-            # 1: consume while tests are running
-            self.consume_results()
-            if not any([p.is_alive() for p in procs]):
-                break
+        # 1: consume results for as long as any worker is alive.
+        #
+        # resultsq.put() is asynchronous: it hands the payload to a background
+        # feeder thread, and a worker cannot exit until that thread has flushed
+        # everything into the pipe. The pipe holds ~64 KB, so on a suite whose
+        # formatter output is larger than that the feeder blocks until the parent
+        # reads. Waiting on jobsq.join() or p.join() before the queue is drained
+        # therefore deadlocks: the parent waits for the workers, each worker waits
+        # for its feeder thread, and the feeder waits for the parent to read.
+        while any([p.is_alive() for p in procs]):
+            self.consume_results(timeout=0.1)
 
-        if any([p.is_alive() for p in procs]):
-            self.jobsq.join()   # wait for all jobs to be processed
-            print ("INFO: all jobs have been processed")
+        print ("INFO: all jobs have been processed")
 
-            while self.consume_results(timeout=0.1):
-                # 2: remaining results
-                pass
-
-            # then, wait for all workers to exit:
-            [p.join() for p in procs]
+        # Safe now: every worker has already exited, so nothing is mid-flush.
+        for p in procs:
+            p.join(timeout=WORKER_JOIN_TIMEOUT)
 
         print ("INFO: all sub-processes have returned")
 
         while self.consume_results(timeout=0.1):
-            # 3: just in case some arrive late in the pipe
+            # 2: whatever is still buffered in the pipe
             pass
 
         for f in self.features:
