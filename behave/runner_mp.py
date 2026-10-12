@@ -44,6 +44,7 @@ class MultiProcRunner(Runner):
         self.load_step_definitions()
         features = parse_features(feature_locations, language=self.config.lang)
         self.features.extend(features)
+        self.run_before_workers_hook()
         feature_count, scenario_count = self.scan_features()
         njobs = len(self.jobs_map)
         proc_count = int(self.config.proc_count)
@@ -123,6 +124,23 @@ class MultiProcRunner(Runner):
             reporter.end()
 
         return self.results_fail
+
+    def run_before_workers_hook(self):
+        """Run the optional 'before_workers' hook once in the parent, before any worker forks.
+
+        Failures are reported but do not abort the run: workers still run their own setup.
+        """
+        hook = self.hooks.get('before_workers')
+        if hook is None or self.config.dry_run:
+            return
+        self.context = Context(self)
+        try:
+            with self.context.use_with_user_mode():
+                hook(self.context)
+        except Exception as e:
+            import traceback
+            print("HOOK-ERROR in before_workers: %s: %s" % (e.__class__.__name__, e))
+            traceback.print_exc()
 
     def scan_features(self):
         raise NotImplementedError
