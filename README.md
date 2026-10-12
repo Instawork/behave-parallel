@@ -62,3 +62,8 @@ Known issues when using --processes flag
 
 
 
+
+
+## before_workers hook
+
+Define `before_workers(context)` in `environment.py` to run setup once in the parent process, before any worker is forked (useful for shared test data that workers would otherwise race to create). It runs only with `--processes`. If it raises, a `HOOK-ERROR in before_workers` line is printed and the run continues.
