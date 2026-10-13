@@ -2,15 +2,18 @@
 
 from __future__ import absolute_import
 
-from types import SimpleNamespace
-
 from behave.runner_mp import MultiProcRunner
+
+
+class _Config(object):
+    def __init__(self, dry_run):
+        self.dry_run = dry_run
 
 
 def _runner(hooks, dry_run=False):
     runner = object.__new__(MultiProcRunner)
     runner.hooks = hooks
-    runner.config = SimpleNamespace(dry_run=dry_run)
+    runner.config = _Config(dry_run)
     return runner
 
 
